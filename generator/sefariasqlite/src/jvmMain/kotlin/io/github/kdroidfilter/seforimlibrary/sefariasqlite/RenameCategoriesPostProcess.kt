@@ -138,17 +138,15 @@ private fun parsePairs(lines: List<String>): List<Pair<String, String>> = lines.
 }
 
 /**
- * `name,sourcePath,destPath` rows. Detects and discards the header row by content
- * (`name,sourcePath,destPath`) rather than blindly skipping line 0, so a
- * future header-less upload doesn't silently drop the first real entry.
+ * `name,Source path,Destination path` rows. Drops the header row if present;
+ * if the first line doesn't look like a header (no "path" token), treats it as
+ * data and logs a warning so a header-less upload doesn't silently lose row 0.
  */
 private fun parseBookMoves(lines: List<String>, logger: Logger): List<BookMove> {
-    if (lines.isEmpty()) return emptyList()
-    val first = parseCsvLine(lines.first()).map { it.trim().lowercase() }
-    val body = if (first.size >= 3 && first[0] == "name" && first[1] == "sourcepath" && first[2] == "destpath") {
+    val body = if (lines.firstOrNull()?.contains("path", ignoreCase = true) == true) {
         lines.drop(1)
     } else {
-        logger.w { "Moving files.csv: expected header 'name,sourcePath,destPath' but got '${lines.first()}'; treating first row as data" }
+        if (lines.isNotEmpty()) logger.w { "Moving files.csv: no header detected; treating first row as data" }
         lines
     }
     return body.mapNotNull { line ->
@@ -265,7 +263,10 @@ private fun findSourceCategories(conn: Connection, pattern: String): List<Pair<L
     conn.prepareStatement("SELECT id, parentId FROM category WHERE title = ?").use { stmt ->
         stmt.setString(1, pattern)
         stmt.executeQuery().use { rs ->
-            while (rs.next()) exact.add(rs.getLong(1) to (rs.getObject(2) as? Long))
+            while (rs.next()) {
+                val parent = rs.getLong(2).let { if (rs.wasNull()) null else it }
+                exact.add(rs.getLong(1) to parent)
+            }
         }
     }
     if (exact.isNotEmpty()) return exact
@@ -275,7 +276,10 @@ private fun findSourceCategories(conn: Connection, pattern: String): List<Pair<L
     conn.prepareStatement("SELECT id, parentId FROM category WHERE title LIKE ? ESCAPE '\\'").use { stmt ->
         stmt.setString(1, likePattern)
         stmt.executeQuery().use { rs ->
-            while (rs.next()) prefix.add(rs.getLong(1) to (rs.getObject(2) as? Long))
+            while (rs.next()) {
+                val parent = rs.getLong(2).let { if (rs.wasNull()) null else it }
+                prefix.add(rs.getLong(1) to parent)
+            }
         }
     }
     return prefix
@@ -361,7 +365,7 @@ private fun downloadCsv(url: String, logger: Logger): List<String> = try {
         readTimeout = 30_000
     }
     val lines = conn.getInputStream().use { it.reader(StandardCharsets.UTF_8).readLines() }
-    if (lines.isEmpty()) lines else listOf(lines.first().removePrefix("﻿")) + lines.drop(1)
+    if (lines.isEmpty()) lines else listOf(lines.first().removePrefix("\uFEFF")) + lines.drop(1)
 } catch (e: Exception) {
     logger.w(e) { "Failed to download $url; skipping section" }
     emptyList()
